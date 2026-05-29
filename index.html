@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Minimal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0c0c0e;
+      --text: #ffffff;
+      --accent: #ffffff;
+    }
+
+    *,
+    *::before,
+    *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      font-family: "Instrument Serif", serif;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: none;
+    }
+
+    /* --- CURSOR --- */
+    #cursor {
+      position: fixed;
+      width: 6px;
+      height: 6px;
+      background: #fff;
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 1000;
+      mix-blend-mode: difference;
+      transform: translate(-50%, -50%);
+    }
+
+    @media (hover: none) and (pointer: coarse) {
+      #cursor {
+        display: none !important;
+      }
+      canvas {
+        cursor: auto;
+      }
+    }
+
+    /* --- LOADING SCREEN --- */
+    #loader {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      z-index: 2000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 1s cubic-bezier(0.7, 0, 0.3, 1), visibility 1s;
+    }
+
+    #loader.hidden {
+      opacity: 0;
+      visibility: hidden;
+    }
+
+    .loader-text {
+      font-size: 10px;
+      letter-spacing: 0.8em;
+      text-transform: uppercase;
+      opacity: 0.3;
+      animation: pulse 2s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.2; }
+      50% { opacity: 0.5; }
+    }
+
+    /* --- DEFAULT LIL-GUI --- */
+  </style>
+</head>
+
+<body>
+
+  <div id="loader">
+    <div class="loader-text">Loading</div>
+  </div>
+
+  <div id="cursor"></div>
+
+  <canvas id="webgl"></canvas>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "lil-gui": "https://unpkg.com/lil-gui@0.19/dist/lil-gui.esm.min.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import GUI from "lil-gui";
+
+    const params = {
+      fade: 0.97,
+      size: 15.0,
+      strength: 0.9,
+      softness: 0.3,
+      velocityScale: 0.5,
+      grainIntensity: 0.04,
+      imagePair: 'Set 1',
+      showCursor: true,
+      bgColor: '#0c0c0e',
+      clearMask: () => {
+        renderer.setRenderTarget(read);
+        renderer.clear();
+        renderer.setRenderTarget(write);
+        renderer.clear();
+        renderer.setRenderTarget(null);
+      }
+    };
+
+    const imageSets = {
+      'Set 1': ['i1.png', 'i2.jpg'],
+      'Set 2': ['image1.png', 'image2.png'],
+      'Set 3': ['img1.png', 'img2.png']
+    };
+
+    const vertexShader = `
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
+    `;
+
+    const fluidShader = `
+      precision highp float;
+      uniform sampler2D uPrev;
+      uniform vec2 uMouse;
+      uniform float uFade;
+      uniform float uSize;
+      uniform float uStrength;
+      varying vec2 vUv;
+
+      void main() {
+        float dist = length(vUv - uMouse);
+        float splat = exp(-dist * uSize);
+        float p = texture2D(uPrev, vUv).r;
+        p *= uFade;
+        p = max(p, splat * uStrength);
+        gl_FragColor = vec4(p, 0.0, 0.0, 1.0);
+      }
+    `;
+
+    const displayShader = `
+      precision highp float;
+      uniform sampler2D uTop;
+      uniform sampler2D uBottom;
+      uniform sampler2D uMask;
+      uniform vec2 uRes;
+      uniform vec2 uImgRes;
+      uniform float uSoftness;
+      uniform float uTime;
+      uniform float uGrain;
+      varying vec2 vUv;
+
+      float random(vec2 p) {
+        return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+      }
+
+      void main() {
+        float sAspect = uRes.x / uRes.y;
+        float iAspect = uImgRes.x / uImgRes.y;
+        vec2 uv = vUv;
+
+        if (sAspect > iAspect) {
+          float scale = iAspect / sAspect;
+          uv.y = (uv.y - 0.5) * scale + 0.5;
+        } else {
+          float scale = sAspect / iAspect;
+          uv.x = (uv.x - 0.5) * scale + 0.5;
+        }
+
+        float mask = texture2D(uMask, vUv).r;
+        float reveal = smoothstep(0.01, uSoftness, mask);
+        
+        vec4 t = texture2D(uTop, uv);
+        vec4 b = texture2D(uBottom, uv);
+        vec4 color = mix(t, b, reveal);
+
+        // Subtle Grain
+        float noise = random(vUv + fract(uTime));
+        color.rgb += (noise - 0.5) * uGrain;
+
+        gl_FragColor = color;
+      }
+    `;
+
+    const canvas = document.getElementById("webgl");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+
+    const loader = new THREE.TextureLoader();
+    
+    async function loadImages(set) {
+      const [pathBottom, pathTop] = imageSets[set];
+      const [tBottom, tTop] = await Promise.all([
+        loader.loadAsync(pathBottom),
+        loader.loadAsync(pathTop)
+      ]);
+      tBottom.wrapS = tBottom.wrapT = THREE.MirroredRepeatWrapping;
+      tTop.wrapS = tTop.wrapT = THREE.MirroredRepeatWrapping;
+      return [tBottom, tTop];
+    }
+
+    let [texBottom, texTop] = await loadImages(params.imagePair);
+    let imgRes = new THREE.Vector2(texBottom.image.width, texBottom.image.height);
+
+    // Hide Loader
+    const loaderEl = document.getElementById('loader');
+    setTimeout(() => {
+      loaderEl.classList.add('hidden');
+    }, 500);
+
+    let read = new THREE.WebGLRenderTarget(512, 512); // Higher res mask
+    let write = new THREE.WebGLRenderTarget(512, 512);
+
+    const simMat = new THREE.ShaderMaterial({
+      vertexShader, fragmentShader: fluidShader,
+      uniforms: {
+        uPrev: { value: null },
+        uMouse: { value: new THREE.Vector2() },
+        uFade: { value: params.fade },
+        uSize: { value: params.size },
+        uStrength: { value: params.strength }
+      }
+    });
+    const simScene = new THREE.Scene();
+    simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simMat));
+
+    const dispMat = new THREE.ShaderMaterial({
+      vertexShader, fragmentShader: displayShader,
+      uniforms: {
+        uTop: { value: texTop },
+        uBottom: { value: texBottom },
+        uMask: { value: null },
+        uRes: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        uImgRes: { value: imgRes },
+        uSoftness: { value: params.softness },
+        uTime: { value: 0 },
+        uGrain: { value: params.grainIntensity }
+      }
+    });
+    const dispScene = new THREE.Scene();
+    dispScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), dispMat));
+
+    const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    
+    const mouse = new THREE.Vector2(0.5, 0.5);
+    const targetMouse = new THREE.Vector2(0.5, 0.5);
+    let velocity = 0;
+    let prevMouse = new THREE.Vector2(0.5, 0.5);
+    let isMoving = false;
+    let currentStrength = 0;
+
+    // --- LIL-GUI ---
+    const gui = new GUI({ title: 'Controls' });
+    
+    const brushFolder = gui.addFolder('Brush Dynamics');
+    brushFolder.add(params, 'size', 5, 100).name('Base Size').onChange(v => simMat.uniforms.uSize.value = v);
+    brushFolder.add(params, 'velocityScale', 0, 1.5).name('Velocity Scale');
+    brushFolder.add(params, 'fade', 0.9, 0.99).name('Persistence').onChange(v => simMat.uniforms.uFade.value = v);
+    brushFolder.add(params, 'strength', 0.1, 1.0).name('Opacity').onChange(v => simMat.uniforms.uStrength.value = v);
+    
+    const visualFolder = gui.addFolder('Atmosphere');
+    visualFolder.add(params, 'imagePair', Object.keys(imageSets)).name('Collection').onChange(async (v) => {
+      const [tBottom, tTop] = await loadImages(v);
+      texBottom = tBottom;
+      texTop = tTop;
+      dispMat.uniforms.uBottom.value = texBottom;
+      dispMat.uniforms.uTop.value = texTop;
+      imgRes.set(texBottom.image.width, texBottom.image.height);
+      dispMat.uniforms.uImgRes.value.copy(imgRes);
+    });
+    visualFolder.addColor(params, 'bgColor').name('Background').onChange(v => {
+      document.documentElement.style.setProperty('--bg', v);
+    });
+    visualFolder.add(params, 'grainIntensity', 0, 0.15).name('Film Grain').onChange(v => dispMat.uniforms.uGrain.value = v);
+    visualFolder.add(params, 'softness', 0.01, 1.0).name('Edge Blur').onChange(v => dispMat.uniforms.uSoftness.value = v);
+    visualFolder.add(params, 'showCursor').name('Custom Cursor').onChange(v => {
+      document.getElementById('cursor').style.display = v ? 'block' : 'none';
+      canvas.style.cursor = v ? 'none' : 'default';
+    });
+
+    gui.add(params, 'clearMask').name('Reset Experience');
+
+    if (window.innerWidth < 768) gui.close();
+
+    function updateInput(x, y) {
+      isMoving = true;
+      targetMouse.set(x / window.innerWidth, 1 - y / window.innerHeight);
+      const cursor = document.getElementById("cursor");
+      if (cursor) {
+        cursor.style.left = x + 'px';
+        cursor.style.top = y + 'px';
+      }
+    }
+
+    window.addEventListener("mousemove", (e) => {
+      updateInput(e.clientX, e.clientY);
+    });
+
+    window.addEventListener("touchstart", (e) => {
+      updateInput(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: false });
+
+    window.addEventListener("touchmove", (e) => {
+      e.preventDefault();
+      updateInput(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: false });
+
+    const clock = new THREE.Clock();
+
+    function render() {
+      requestAnimationFrame(render);
+      const delta = clock.getDelta();
+      const time = clock.elapsedTime;
+
+      // Smooth mouse interpolation
+      mouse.lerp(targetMouse, 0.15);
+      
+      // Calculate velocity for dynamic brush size
+      velocity = mouse.distanceTo(prevMouse) * 500;
+      prevMouse.copy(mouse);
+
+      // Smoothly fade strength based on movement
+      const targetStrength = isMoving ? params.strength : 0.0;
+      currentStrength = THREE.MathUtils.lerp(currentStrength, targetStrength, 0.1);
+      simMat.uniforms.uStrength.value = currentStrength;
+
+      // Reset isMoving for next frame
+      isMoving = false;
+
+      // Apply dynamic size based on velocity
+      const dynamicSize = params.size + (velocity * params.velocityScale);
+      simMat.uniforms.uSize.value = dynamicSize;
+
+      simMat.uniforms.uPrev.value = read.texture;
+      simMat.uniforms.uMouse.value.copy(mouse);
+
+      renderer.setRenderTarget(write);
+      renderer.render(simScene, cam);
+      [read, write] = [write, read];
+
+      dispMat.uniforms.uMask.value = read.texture;
+      dispMat.uniforms.uTime.value = time;
+      
+      renderer.setRenderTarget(null);
+      renderer.render(dispScene, cam);
+    }
+
+    window.addEventListener("resize", () => {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      dispMat.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
+    });
+
+    render();
+  </script>
+</body>
+
+</html>
